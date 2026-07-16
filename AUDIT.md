@@ -1,38 +1,33 @@
-# Audit record
+# Safety notes
 
-## Scope and provenance
+These are the checks I made before using the driver on my computer. They are
+not a guarantee, but they may be useful to anyone reviewing the project.
 
-- Target hardware: Gotop/SZ PENG YI T501, USB `08f2:6811`.
-- Confirmed rebrand: Tomate MTM-1106 (pressure tablet without a display).
-- Upstream repository: `feveal/Tablet-VINSA-1060-Plus-Linux-Driver`.
-- Reviewed upstream commit: `aedea60d2ab4df2e4895346217f63a69cd8fdf7e`.
-- License: GPL-3.0, preserved in this fork.
-- Full-area protocol source: DIGImend `10moons-tools` and the related T501
-  hardware investigations.
+## Source
 
-## Code review
+- Hardware: T501 / Tomate MTM-1106, USB `08f2:6811`.
+- Upstream project: `feveal/Tablet-VINSA-1060-Plus-Linux-Driver`.
+- Upstream commit reviewed: `aedea60d2ab4df2e4895346217f63a69cd8fdf7e`.
+- License: GPL-3.0.
+- Full-area initialization is based on the DIGImend `10moons-tools` work.
 
-The Rust driver is small (three source files, about 700 lines after the local
-changes). A manual review found no network client, subprocess execution,
-credential access, arbitrary filesystem access, deletion logic, dynamic code
-loading, or Rust `unsafe` blocks.
+## What I checked
 
-The program performs two privileged-in-effect operations as the desktop user:
+The Rust code does not contain network access, external command execution,
+credential access, dynamic code loading, or `unsafe` blocks.
 
-1. It sends four fixed USB feature reports only to device `08f2:6811`, claims
-   that device's interfaces, and reads interrupt endpoint `0x84`.
-2. It creates a virtual pen and keyboard through `/dev/uinput`.
+It does two important things:
 
-The second capability is inherently sensitive: a malicious program with the
-same access could synthesize keyboard input. For that reason, popularity or a
-successful antivirus scan is not sufficient evidence of safety.
+1. Talks to USB device `08f2:6811` and reads its pen reports.
+2. Creates virtual input devices through `/dev/uinput`.
 
-## Dependency review
+Access to `uinput` is sensitive because it can create keyboard or pointer
+events. The included rule only grants access to the logged-in user and only
+matches this tablet. It does not use `MODE="0666"`.
 
-The lockfile contains 26 Rust packages and only crates.io registry sources; it
-contains no Git dependencies. On 2026-07-16, `cargo audit` checked the locked
-dependency graph against 1,160 RustSec advisories and reported no known
-vulnerabilities. The following also passed with the locked dependency set:
+`Cargo.lock` contains 26 crates.io packages and no Git dependencies. On
+2026-07-16, `cargo audit` found no known RustSec vulnerabilities. These checks
+also passed:
 
 ```text
 cargo test --all-targets --locked
@@ -40,39 +35,22 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo build --release --locked
 ```
 
-The reference build produced in the Fedora 43 container with Cargo/Rust
-1.96.1 has SHA-256:
+The binary built in the Fedora 43 container had this SHA-256:
 
 ```text
 3b49e8d30d89b1c3171620cbb57f7b8ffa69ec3a4ba1749bbb022fc5ea836af8
 ```
 
-This is a point-in-time review, not a permanent guarantee. Re-run the checks
-after changing code, dependencies, compiler, or build environment.
+Run the checks again if the code, dependencies, or build environment change.
 
-## Findings addressed in this fork
+## Main changes from upstream
 
-- The upstream README granted world read/write access (`0666`) to the tablet,
-  all input devices, and `uinput`. Those instructions are not retained.
-- The upstream Rust code sent only one of the four DIGImend initialization
-  reports and reset in an order that made full-area startup timing-dependent.
-- The original loop could repeatedly scan and reconnect. This fork initializes
-  once for each add event and exits when the device disappears.
-- The original virtual pen emitted undeclared touch events and lacked a pen
-  proximity capability, which could fail on current kernels/compositors.
-- The original virtual pen emitted X, Y, and pressure in separate `evdev`
-  batches. Because `VirtualDevice::emit()` appends `SYN_REPORT`, diagonal
-  samples appeared as horizontal and vertical steps in strict drawing apps.
-- The old desktop launcher could race a second copy of the reader and was
-  removed in favor of one systemd user service.
-
-## Runtime containment
-
-The included USB rule matches only `08f2:6811`, uses `TAG+="uaccess"`, and
-starts no executable in the udev worker. The service runs under the active
-user, has no restart loop, cannot write to the home or system filesystem, and
-is restricted from Internet address families. It requires the Plasma workspace
-and is stopped with it, so the packaged Bazzite setup does not run in Game Mode.
+- Use the full four-report initialization sequence.
+- Start once when the tablet is connected and stop when it is removed.
+- Send each pen sample in one evdev batch to fix stair-step diagonals.
+- Use an exact-device `uaccess` rule instead of world-writable permissions.
+- Use one systemd user service instead of the old desktop launcher.
+- Declare pressure, touch, proximity, axes, and pen buttons correctly.
 
 ## References
 
