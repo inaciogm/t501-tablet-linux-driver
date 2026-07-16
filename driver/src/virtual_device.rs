@@ -1,14 +1,12 @@
-// VINSA 1060 Plus Linux Driver (V2), (by feveal@hotmail.com)
-use std::io::Error;
+// Derived from feveal's VINSA 1060 Plus V2 userspace driver.
 use std::collections::HashMap;
+use std::io::Error;
 
 use evdev::{
+    AbsInfo, AbsoluteAxisType, AttributeSet, EventType, InputEvent, Key, UinputAbsSetup,
     uinput::{VirtualDevice, VirtualDeviceBuilder},
-    AbsInfo, AbsoluteAxisType, AttributeSet, EventType, InputEvent, Key, Synchronization,
-    UinputAbsSetup,
 };
 
-#[derive(Default)]
 pub struct RawDataReader {
     pub data: Vec<u8>,
 }
@@ -30,29 +28,29 @@ impl RawDataReader {
         }
     }
 
-    fn u16_from_2_u8(&self, high: u8, low: u8) -> u16 {
+    fn u16_from_2_u8(high: u8, low: u8) -> u16 {
         (high as u16) << 8 | low as u16
     }
 
     fn x_axis(&self) -> i32 {
-        let raw = self.u16_from_2_u8(self.data[Self::X_AXIS_HIGH], self.data[Self::X_AXIS_LOW]);
+        let raw = Self::u16_from_2_u8(self.data[Self::X_AXIS_HIGH], self.data[Self::X_AXIS_LOW]);
         raw as i32
     }
 
     fn y_axis(&self) -> i32 {
-        let raw = self.u16_from_2_u8(self.data[Self::Y_AXIS_HIGH], self.data[Self::Y_AXIS_LOW]);
+        let raw = Self::u16_from_2_u8(self.data[Self::Y_AXIS_HIGH], self.data[Self::Y_AXIS_LOW]);
         raw as i32
     }
 
     fn pressure(&self) -> i32 {
-        self.u16_from_2_u8(
+        Self::u16_from_2_u8(
             self.data[Self::PRESSURE_HIGH],
             self.data[Self::PRESSURE_LOW],
         ) as i32
     }
 
     fn tablet_buttons_as_binary_flags(&self) -> u16 {
-        self.u16_from_2_u8(
+        Self::u16_from_2_u8(
             self.data[Self::TABLET_BUTTONS_HIGH],
             self.data[Self::TABLET_BUTTONS_LOW],
         ) | (0xcc << 8)
@@ -71,6 +69,7 @@ pub struct DeviceDispatcher {
     virtual_pen: VirtualDevice,
     virtual_keyboard: VirtualDevice,
     was_touching: bool,
+    was_in_proximity: bool,
     is_mouse_mode: bool,
     last_x: i32,
     last_y: i32,
@@ -78,77 +77,71 @@ pub struct DeviceDispatcher {
     mouse_area_scale: f32,
 }
 
-impl Default for DeviceDispatcher {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl DeviceDispatcher {
     const PRESSED: i32 = 1;
     const RELEASED: i32 = 0;
     const HOLD: i32 = 2;
 
-    pub fn new() -> Self {
-        let default_tablet_button_id_to_key_code_map: HashMap<u8, Vec<Key>> = [
-            (0, vec![Key::KEY_TAB]),        // TAB
-            (1, vec![Key::KEY_SPACE]),      // SPACE
-            (2, vec![Key::KEY_LEFTALT]),    // ALT
-            (3, vec![Key::KEY_LEFTCTRL]),   // CTRL
-            (4, vec![Key::KEY_PAGEUP]),     // MOUSE UP
-            (5, vec![Key::KEY_PAGEDOWN]),   // MOUSE DOWN
-            (6, vec![Key::KEY_LEFTBRACE]),  // MOUSE AREA -
+    pub fn new() -> Result<Self, Error> {
+        let tablet_button_id_to_key_code_map = HashMap::from([
+            (0, vec![Key::KEY_TAB]),                        // TAB
+            (1, vec![Key::KEY_SPACE]),                      // SPACE
+            (2, vec![Key::KEY_LEFTALT]),                    // ALT
+            (3, vec![Key::KEY_LEFTCTRL]),                   // CTRL
+            (4, vec![Key::KEY_PAGEUP]),                     // MOUSE UP
+            (5, vec![Key::KEY_PAGEDOWN]),                   // MOUSE DOWN
+            (6, vec![Key::KEY_LEFTBRACE]),                  // MOUSE AREA -
             (7, vec![Key::KEY_LEFTCTRL, Key::KEY_KPMINUS]), // CTRL- ZOOM
             (8, vec![Key::KEY_LEFTCTRL, Key::KEY_KPPLUS]),  // CTRL+ ZOOM
-            (9, vec![Key::KEY_ESC]),        // ESC CANCEL
-            (12, vec![Key::KEY_B]),         // TOGGLE MOUSE/TABLET
-            (13, vec![Key::KEY_RIGHTBRACE]), // MOUSE AREA +
-        ]
-        .iter()
-        .cloned()
-        .collect();
+            (9, vec![Key::KEY_ESC]),                        // ESC CANCEL
+            (12, vec![Key::KEY_B]),                         // TOGGLE MOUSE/TABLET
+            (13, vec![Key::KEY_RIGHTBRACE]),                // MOUSE AREA +
+        ]);
 
-        let default_pen_button_id_to_key_code_map: HashMap<u8, Vec<Key>> =
-            [(4, vec![Key::BTN_STYLUS]), (6, vec![Key::BTN_STYLUS2])]
-                .iter()
+        let pen_button_id_to_key_code_map =
+            HashMap::from([(4, vec![Key::BTN_STYLUS]), (6, vec![Key::BTN_STYLUS2])]);
+
+        let virtual_pen = Self::virtual_pen_builder(
+            &pen_button_id_to_key_code_map
+                .values()
+                .flatten()
                 .cloned()
-                .collect();
+                .collect::<Vec<Key>>(),
+        )?;
+        let virtual_keyboard = Self::virtual_keyboard_builder(
+            &tablet_button_id_to_key_code_map
+                .values()
+                .flatten()
+                .cloned()
+                .collect::<Vec<Key>>(),
+        )?;
 
-        DeviceDispatcher {
+        Ok(DeviceDispatcher {
             tablet_last_raw_pressed_buttons: 0xFFFF,
             pen_last_raw_pressed_button: 0,
-            tablet_button_id_to_key_code_map: default_tablet_button_id_to_key_code_map.clone(),
-            pen_button_id_to_key_code_map: default_pen_button_id_to_key_code_map.clone(),
-            virtual_pen: Self::virtual_pen_builder(
-                &default_pen_button_id_to_key_code_map
-                    .values()
-                    .flatten()
-                    .cloned()
-                    .collect::<Vec<Key>>(),
-            )
-            .expect("Error building virtual pen"),
-            virtual_keyboard: Self::virtual_keyboard_builder(
-                &default_tablet_button_id_to_key_code_map
-                    .values()
-                    .flatten()
-                    .cloned()
-                    .collect::<Vec<Key>>(),
-            )
-            .expect("Error building virtual keyboard"),
+            tablet_button_id_to_key_code_map,
+            pen_button_id_to_key_code_map,
+            virtual_pen,
+            virtual_keyboard,
             was_touching: false,
-            is_mouse_mode: true,
+            was_in_proximity: false,
+            // A drawing tablet must start in absolute/full-area mode.
+            is_mouse_mode: false,
             last_x: 2048,
             last_y: 2048,
             mouse_area_scale: 0.3,
             last_valid_x: 2048,
-        }
+        })
     }
 
     fn smooth_coordinates(&mut self, x: i32, y: i32) -> (i32, i32) {
+        // Keep the optional mouse mode smooth, but do not add drawing lag in
+        // tablet mode. The upstream V2 code retained 75% of the previous
+        // coordinate, which made precise strokes trail behind the pen.
         let (smoothed_x, smoothed_y) = if self.is_mouse_mode {
-            ((self.last_x * 1 + x) / 2, (self.last_y * 1 + y) / 2)
+            ((self.last_x + x) / 2, (self.last_y + y) / 2)
         } else {
-            ((self.last_x * 3 + x) / 4, (self.last_y * 3 + y) / 4)
+            (x, y)
         };
 
         self.last_x = smoothed_x;
@@ -157,29 +150,27 @@ impl DeviceDispatcher {
         (smoothed_x, smoothed_y)
     }
 
-    pub fn syn(&mut self) -> Result<(), Error> {
-        self.virtual_keyboard.emit(&[InputEvent::new(
-            EventType::SYNCHRONIZATION,
-            Synchronization::SYN_REPORT.0,
-            0,
-        )])?;
-        self.virtual_pen.emit(&[InputEvent::new(
-            EventType::SYNCHRONIZATION,
-            Synchronization::SYN_REPORT.0,
-            0,
-        )])?;
+    pub fn dispatch(&mut self, raw_data: &RawDataReader) -> Result<(), Error> {
+        // evdev::VirtualDevice::emit() appends SYN_REPORT automatically. All
+        // simultaneous pen values must therefore be passed in one call; if X
+        // and Y are emitted separately, drawing applications see horizontal
+        // and vertical sub-movements instead of one diagonal sample.
+        let pen_events = self.pen_events(raw_data);
+        self.virtual_pen.emit(&pen_events)?;
+
+        let tablet_events = self.tablet_events(raw_data);
+        if !tablet_events.is_empty() {
+            self.virtual_keyboard.emit(&tablet_events)?;
+        }
+
         Ok(())
     }
 
-    pub fn dispatch(&mut self, raw_data: &RawDataReader) {
-        self.emit_pen_events(raw_data);
-        self.emit_tablet_events(raw_data);
-    }
-
-    fn emit_tablet_events(&mut self, raw_data: &RawDataReader) {
+    fn tablet_events(&mut self, raw_data: &RawDataReader) -> Vec<InputEvent> {
         let raw_button_as_binary_flags = raw_data.tablet_buttons_as_binary_flags();
-        self.binary_flags_to_tablet_key_events(raw_button_as_binary_flags);
+        let events = self.tablet_key_events(raw_button_as_binary_flags);
         self.tablet_last_raw_pressed_buttons = raw_button_as_binary_flags;
+        events
     }
 
     fn virtual_keyboard_builder(tablet_emitted_keys: &[Key]) -> Result<VirtualDevice, Error> {
@@ -189,18 +180,25 @@ impl DeviceDispatcher {
         }
 
         VirtualDeviceBuilder::new()?
-            .name("virtual_tablet")
+            .name("Tomate MTM-1106 Pad")
             .with_keys(&key_set)?
             .build()
     }
 
-    fn binary_flags_to_tablet_key_events(&mut self, raw_button_as_flags: u16) {
-        (0..14)
-            .filter(|i| ![10, 11].contains(i))
-            .for_each(|i| self.emit_tablet_key_event(i, raw_button_as_flags));
+    fn tablet_key_events(&mut self, raw_button_as_flags: u16) -> Vec<InputEvent> {
+        let mut events = Vec::new();
+        for id in (0..14).filter(|id| ![10, 11].contains(id)) {
+            self.collect_tablet_key_events(id, raw_button_as_flags, &mut events);
+        }
+        events
     }
 
-    pub fn emit_tablet_key_event(&mut self, i: u8, raw_button_as_flags: u16) {
+    fn collect_tablet_key_events(
+        &mut self,
+        i: u8,
+        raw_button_as_flags: u16,
+        events: &mut Vec<InputEvent>,
+    ) {
         let id_as_binary_mask = 1 << i;
         let is_pressed = (raw_button_as_flags & id_as_binary_mask) == 0;
         let was_pressed = (self.tablet_last_raw_pressed_buttons & id_as_binary_mask) == 0;
@@ -221,43 +219,43 @@ impl DeviceDispatcher {
             // Button ] - Enlarge mouse area
             if i == 13 && state == Self::PRESSED {
                 self.mouse_area_scale = (self.mouse_area_scale * 1.2).min(0.4);
-                eprintln!("Mouse area increased: {:.0}%", self.mouse_area_scale * 100.0);
+                eprintln!(
+                    "Mouse area increased: {:.0}%",
+                    self.mouse_area_scale * 100.0
+                );
                 return;
             }
 
             // Toggle with B button
             if i == 12 && state == Self::PRESSED {
                 self.is_mouse_mode = !self.is_mouse_mode;
-                eprintln!("Mode: {}", if self.is_mouse_mode { "MOUSE" } else { "TABLET" });
+                eprintln!(
+                    "Mode: {}",
+                    if self.is_mouse_mode {
+                        "MOUSE"
+                    } else {
+                        "TABLET"
+                    }
+                );
                 return;
             }
 
             if let Some(keys) = self.tablet_button_id_to_key_code_map.get(&i) {
                 for &key in keys {
-                    self.virtual_keyboard
-                        .emit(&[InputEvent::new(EventType::KEY, key.code(), state)])
-                        .expect("Error emitting virtual keyboard key.");
+                    events.push(InputEvent::new(EventType::KEY, key.code(), state));
                 }
-
-                self.virtual_keyboard
-                    .emit(&[InputEvent::new(
-                        EventType::SYNCHRONIZATION,
-                        Synchronization::SYN_REPORT.0,
-                        0,
-                    )])
-                    .expect("Error emitting SYN.");
             }
         }
     }
 
     fn virtual_pen_builder(pen_emitted_keys: &[Key]) -> Result<VirtualDevice, Error> {
         let abs_x_setup =
-            UinputAbsSetup::new(AbsoluteAxisType::ABS_X, AbsInfo::new(0, 0, 4096, 0, 0, 1));
+            UinputAbsSetup::new(AbsoluteAxisType::ABS_X, AbsInfo::new(0, 0, 4096, 0, 0, 16));
         let abs_y_setup =
-            UinputAbsSetup::new(AbsoluteAxisType::ABS_Y, AbsInfo::new(0, 0, 4096, 0, 0, 1));
+            UinputAbsSetup::new(AbsoluteAxisType::ABS_Y, AbsInfo::new(0, 0, 4096, 0, 0, 27));
         let abs_pressure_setup = UinputAbsSetup::new(
             AbsoluteAxisType::ABS_PRESSURE,
-            AbsInfo::new(0, 0, 8191, 0, 0, 1), // Cambiado a 8191
+            AbsInfo::new(0, 0, 6000, 0, 0, 0),
         );
 
         let mut key_set = AttributeSet::<Key>::new();
@@ -265,12 +263,15 @@ impl DeviceDispatcher {
             key_set.insert(*key);
         }
 
-        for key in &[Key::BTN_TOOL_PEN, Key::BTN_LEFT, Key::BTN_RIGHT] {
+        // BTN_TOUCH was emitted by the original code without being declared,
+        // causing EINVAL/panics on current kernels. BTN_TOOL_PEN is required
+        // for libinput/KWin to identify proximity correctly.
+        for key in &[Key::BTN_TOOL_PEN, Key::BTN_TOUCH] {
             key_set.insert(*key);
         }
 
         VirtualDeviceBuilder::new()?
-            .name("virtual_tablet")
+            .name("Tomate MTM-1106 Pen")
             .with_absolute_axis(&abs_x_setup)?
             .with_absolute_axis(&abs_y_setup)?
             .with_absolute_axis(&abs_pressure_setup)?
@@ -278,7 +279,8 @@ impl DeviceDispatcher {
             .build()
     }
 
-    fn emit_pen_events(&mut self, raw_data: &RawDataReader) {
+    fn pen_events(&mut self, raw_data: &RawDataReader) -> Vec<InputEvent> {
+        let mut events = Vec::with_capacity(8);
         let y_raw = raw_data.y_axis();
         let is_multimedia_area = y_raw >= 61000;
 
@@ -287,7 +289,8 @@ impl DeviceDispatcher {
         }
 
         let raw_pen_buttons = raw_data.pen_buttons();
-        self.raw_pen_buttons_to_pen_key_events(raw_pen_buttons);
+        self.collect_pen_proximity_event(raw_pen_buttons != 0, &mut events);
+        self.collect_pen_button_events(raw_pen_buttons, &mut events);
         self.pen_last_raw_pressed_button = raw_pen_buttons;
 
         // Pressure normalization by mode
@@ -303,14 +306,15 @@ impl DeviceDispatcher {
             self.smooth_coordinates(raw_data.x_axis(), raw_data.y_axis())
         };
 
-        self.raw_pen_abs_to_pen_abs_events(
+        events.extend(self.pen_position_events(
             smoothed_x,
             smoothed_y,
             normalized_pressure,
-            is_multimedia_area
-        );
+            is_multimedia_area,
+        ));
 
-        self.pen_emit_touch(raw_data);
+        self.collect_pen_touch_event(normalized_pressure, &mut events);
+        events
     }
 
     fn normalize_pressure_mode(raw_pressure: i32, threshold: i32, scaling: i32) -> i32 {
@@ -320,7 +324,13 @@ impl DeviceDispatcher {
         }
     }
 
-    fn raw_pen_abs_to_pen_abs_events(&mut self, x_axis: i32, y_axis: i32, pressure: i32, is_multimedia_area: bool) {
+    fn pen_position_events(
+        &self,
+        x_axis: i32,
+        y_axis: i32,
+        pressure: i32,
+        is_multimedia_area: bool,
+    ) -> [InputEvent; 3] {
         let (x, y) = if is_multimedia_area {
             (self.last_valid_x, 0) // Use last valid X and top position
         } else if self.is_mouse_mode {
@@ -334,64 +344,123 @@ impl DeviceDispatcher {
 
             (scaled_x.clamp(0, 4096), scaled_y.clamp(0, 4096))
         } else {
-            (x_axis, y_axis.clamp(0, 4095))
+            (x_axis.clamp(0, 4096), y_axis.clamp(0, 4096))
         };
 
-        self.virtual_pen.emit(&[InputEvent::new(
-            EventType::ABSOLUTE,
-            AbsoluteAxisType::ABS_X.0,
-            x,
-        )]).expect("Error emitting ABS_X.");
-
-        self.virtual_pen.emit(&[InputEvent::new(
-            EventType::ABSOLUTE,
-            AbsoluteAxisType::ABS_Y.0,
-            y,
-        )]).expect("Error emitting ABS_Y.");
-
-        self.virtual_pen.emit(&[InputEvent::new(
-            EventType::ABSOLUTE,
-            AbsoluteAxisType::ABS_PRESSURE.0,
-            pressure,
-        )]).expect("Error emitting Pressure.");
+        Self::absolute_pen_events(x, y, pressure)
     }
 
-    fn pen_emit_touch(&mut self, raw_data: &RawDataReader) {
-        let normalized_pressure = if self.is_mouse_mode {
-            Self::normalize_pressure_mode(raw_data.pressure(), 800, 2)
-        } else {
-            Self::normalize_pressure_mode(raw_data.pressure(), 510, 3)
-        };
+    fn absolute_pen_events(x: i32, y: i32, pressure: i32) -> [InputEvent; 3] {
+        [
+            InputEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_X.0, x),
+            InputEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_Y.0, y),
+            InputEvent::new(
+                EventType::ABSOLUTE,
+                AbsoluteAxisType::ABS_PRESSURE.0,
+                pressure.clamp(0, 6000),
+            ),
+        ]
+    }
 
+    fn collect_pen_proximity_event(&mut self, in_proximity: bool, events: &mut Vec<InputEvent>) {
+        if in_proximity != self.was_in_proximity {
+            events.push(InputEvent::new(
+                EventType::KEY,
+                Key::BTN_TOOL_PEN.code(),
+                if in_proximity {
+                    Self::PRESSED
+                } else {
+                    Self::RELEASED
+                },
+            ));
+            self.was_in_proximity = in_proximity;
+        }
+    }
+
+    fn collect_pen_touch_event(&mut self, normalized_pressure: i32, events: &mut Vec<InputEvent>) {
         let is_touching = normalized_pressure > 0;
         if let Some(state) = match (self.was_touching, is_touching) {
             (false, true) => Some(Self::PRESSED),
             (true, false) => Some(Self::RELEASED),
             _ => None,
         } {
-            self.virtual_pen.emit(&[InputEvent::new(
+            events.push(InputEvent::new(
                 EventType::KEY,
                 Key::BTN_TOUCH.code(),
                 state,
-            )]).expect("Error emitting Touch");
+            ));
         }
         self.was_touching = is_touching;
     }
 
-    fn raw_pen_buttons_to_pen_key_events(&mut self, pen_button: u8) {
-        if let Some((state, id)) = match (self.pen_last_raw_pressed_button, pen_button) {
+    fn collect_pen_button_events(&mut self, pen_button: u8, events: &mut Vec<InputEvent>) {
+        let Some((state, id)) = (match (self.pen_last_raw_pressed_button, pen_button) {
             (2, x) if x == 6 || x == 4 => Some((Self::PRESSED, x)),
             (x, 2) if x == 6 || x == 4 => Some((Self::RELEASED, x)),
             (x, y) if x != 2 && x == y => Some((Self::HOLD, x)),
             _ => None,
-        } {
-            if let Some(keys) = self.pen_button_id_to_key_code_map.get(&id) {
-                for key in keys {
-                    self.virtual_pen
-                        .emit(&[InputEvent::new(EventType::KEY, key.code(), state)])
-                        .expect("Error emitting pen keys.")
-                }
-            }
+        }) else {
+            return;
+        };
+
+        let Some(keys) = self.pen_button_id_to_key_code_map.get(&id) else {
+            return;
+        };
+
+        for key in keys {
+            events.push(InputEvent::new(EventType::KEY, key.code(), state));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeviceDispatcher, RawDataReader};
+    use evdev::{AbsoluteAxisType, EventType};
+
+    #[test]
+    fn raw_report_decodes_coordinates_pressure_and_pen_state() {
+        let mut report = RawDataReader::new();
+        report.data[RawDataReader::X_AXIS_HIGH] = 0x12;
+        report.data[RawDataReader::X_AXIS_LOW] = 0x34;
+        report.data[RawDataReader::Y_AXIS_HIGH] = 0x23;
+        report.data[RawDataReader::Y_AXIS_LOW] = 0x45;
+        report.data[RawDataReader::PRESSURE_HIGH] = 0x06;
+        report.data[RawDataReader::PRESSURE_LOW] = 0x40;
+        report.data[RawDataReader::PEN_BUTTONS] = 0x02;
+
+        assert_eq!(report.x_axis(), 0x1234);
+        assert_eq!(report.y_axis(), 0x2345);
+        assert_eq!(report.pressure(), 0x0640);
+        assert_eq!(report.pen_buttons(), 0x02);
+    }
+
+    #[test]
+    fn tablet_pressure_dead_zone_and_scale_are_stable() {
+        assert_eq!(DeviceDispatcher::normalize_pressure_mode(1490, 510, 3), 0);
+        assert_eq!(
+            DeviceDispatcher::normalize_pressure_mode(1489, 510, 3),
+            1533
+        );
+        assert_eq!(DeviceDispatcher::normalize_pressure_mode(0, 510, 3), 6000);
+        assert_eq!(DeviceDispatcher::normalize_pressure_mode(2500, 510, 3), 0);
+    }
+
+    #[test]
+    fn coordinates_and_pressure_share_one_event_batch() {
+        let events = DeviceDispatcher::absolute_pen_events(123, 456, 789);
+
+        assert_eq!(events.len(), 3);
+        assert!(
+            events
+                .iter()
+                .all(|event| event.event_type() == EventType::ABSOLUTE)
+        );
+        assert_eq!(events[0].code(), AbsoluteAxisType::ABS_X.0);
+        assert_eq!(events[0].value(), 123);
+        assert_eq!(events[1].code(), AbsoluteAxisType::ABS_Y.0);
+        assert_eq!(events[1].value(), 456);
+        assert_eq!(events[2].code(), AbsoluteAxisType::ABS_PRESSURE.0);
+        assert_eq!(events[2].value(), 789);
     }
 }

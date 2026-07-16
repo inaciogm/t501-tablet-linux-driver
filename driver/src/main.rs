@@ -1,53 +1,100 @@
-mod virtual_device;
 mod physical_device;
+mod virtual_device;
 
-use signal_hook::consts::signal::*;
+use rusb::Error as UsbError;
+use signal_hook::consts::signal::{SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::flag::register;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::error::Error;
 use std::sync::Arc;
-use std::u16;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use physical_device::PhysicalDevice;
 use virtual_device::{DeviceDispatcher, RawDataReader};
 
 const VID: u16 = 0x08f2;
 const PID: u16 = 0x6811;
+const MIN_REPORT_LENGTH: usize = 13;
+const ACCESS_WAIT: Duration = Duration::from_secs(5);
+const ACCESS_RETRY: Duration = Duration::from_millis(100);
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
+    let stop = Arc::new(AtomicBool::new(false));
+    for signal in [SIGINT, SIGTERM, SIGQUIT] {
+        register(signal, Arc::clone(&stop))?;
+    }
 
-    let mut physical_device = PhysicalDevice::new(VID, PID);
-    physical_device.init().set_full_mode();
+    if !wait_for_tablet_access(&stop)? {
+        println!("Tomate MTM-1106 is not connected; nothing to do.");
+        return Ok(());
+    }
 
-    let mut data_reader = RawDataReader::new();
-    let mut device_dispatcher = DeviceDispatcher::new();
+    if stop.load(Ordering::Relaxed) {
+        return Ok(());
+    }
 
-    println!("Driver is running.");
-    main_loop({
-        || {
-            if physical_device
-                .read_device_responses(&mut data_reader.data)
-                .is_ok()
-            {
-                device_dispatcher.dispatch(&data_reader);
-                if device_dispatcher.syn().is_err() {
-                    println!("Error emitting SYN.");
-                }
-            }
-        }
-    });
+    // Initialization is deliberately attempted once per device connection.
+    // A later USB add event starts a fresh process after reconnection.
+    let mut tablet = PhysicalDevice::connect(VID, PID)?;
+    run_connected(&mut tablet, &stop);
+    println!("Tablet reader exited; the USB port is free.");
+    Ok(())
 }
 
-fn main_loop(mut f: impl FnMut()) {
-    let signals: Vec<i32> = vec![SIGINT, SIGTERM, SIGQUIT];
-    let flag = Arc::new(AtomicBool::new(false));
+fn wait_for_tablet_access(stop: &AtomicBool) -> Result<bool, UsbError> {
+    let deadline = Instant::now() + ACCESS_WAIT;
 
-    for signal in signals {
-        register(signal, Arc::clone(&flag)).expect("Error registering interrupt signals.");
-    }
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
 
-    while !flag.load(Ordering::Relaxed) {
-        f();
+        match PhysicalDevice::check_access(VID, PID) {
+            Ok(()) => return Ok(true),
+            Err(UsbError::NoDevice) => return Ok(false),
+            Err(UsbError::Access) if Instant::now() < deadline => sleep(ACCESS_RETRY),
+            Err(error) => return Err(error),
+        }
     }
-    println!();
-    println!("The driver has exited.")
+}
+
+fn run_connected(tablet: &mut PhysicalDevice, stop: &AtomicBool) {
+    let mut reader = RawDataReader::new();
+    let mut dispatcher = None;
+
+    println!("Tomate MTM-1106 initialized in full-area mode.");
+
+    while !stop.load(Ordering::Relaxed) {
+        reader.data.fill(0);
+        match tablet.read(&mut reader.data) {
+            Ok(length) if length >= MIN_REPORT_LENGTH => {
+                if dispatcher.is_none() {
+                    match DeviceDispatcher::new() {
+                        Ok(device) => {
+                            dispatcher = Some(device);
+                            println!("Pen input is ready.");
+                        }
+                        Err(error) => {
+                            eprintln!("Could not create virtual pen: {error}");
+                            return;
+                        }
+                    }
+                }
+
+                if let Some(device) = dispatcher.as_mut()
+                    && let Err(error) = device.dispatch(&reader)
+                {
+                    eprintln!("Could not emit tablet input: {error}");
+                    return;
+                }
+            }
+            Ok(length) => eprintln!("Ignoring short tablet report ({length} bytes)."),
+            Err(UsbError::Timeout) => {}
+            Err(error) => {
+                eprintln!("Tomate MTM-1106 disconnected ({error}).");
+                return;
+            }
+        }
+    }
 }

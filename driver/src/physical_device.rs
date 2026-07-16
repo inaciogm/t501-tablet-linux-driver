@@ -1,114 +1,172 @@
-use rusb::{
-    devices, ConfigDescriptor, Device, DeviceHandle, Error as RusbError, GlobalContext,
-    InterfaceDescriptor, TransferType,
-};
-
+use rusb::{Device, DeviceHandle, Error as UsbError, GlobalContext, devices};
 use std::time::Duration;
 
+const DATA_INTERFACE: u8 = 1;
+const MODE_INTERFACE: u8 = 2;
+const DATA_ENDPOINT: u8 = 0x84;
+const ACTIVE_CONFIGURATION: u8 = 1;
+
+// Complete 10moons-probe sequence for the Gotop/SZ PENG YI T501
+// (08f2:6811). Sending only the second report made startup intermittent.
+const FULL_AREA_REPORTS: [[u8; 8]; 4] = [
+    [0x08, 0x04, 0x1d, 0x01, 0xff, 0xff, 0x06, 0x2e],
+    [0x08, 0x03, 0x00, 0xff, 0xf0, 0x00, 0xff, 0xf0],
+    [0x08, 0x06, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+    [0x08, 0x03, 0x00, 0xff, 0xf0, 0x00, 0xff, 0xf0],
+];
+
 pub struct PhysicalDevice {
-    device: Device<GlobalContext>,
-    device_handle: DeviceHandle<GlobalContext>,
-    endpoint_address: u8,
+    handle: DeviceHandle<GlobalContext>,
+    detached_interfaces: Vec<u8>,
 }
 
 impl PhysicalDevice {
-    pub fn new(vid: u16, pid: u16) -> Self {
-        let device = Self::get_target_device(vid, pid).expect("Error finding device.");
-
-        PhysicalDevice {
-            endpoint_address: 0,
-            device_handle: device.open().expect("Error opening device."),
-            device,
-        }
+    /// Initialize the tablet with the same two-stage sequence used by the
+    /// original DIGImend probe and T501 reader:
+    ///
+    /// 1. Send all four full-area reports through interface 2 and close it.
+    /// 2. Reopen, reset, detach interfaces 0..2, apply configuration 1, and
+    ///    claim the two HID interfaces before reading endpoint 0x84.
+    pub fn connect(vid: u16, pid: u16) -> Result<Self, UsbError> {
+        let device = Self::target_device(vid, pid)?;
+        Self::send_full_area_reports(&device)?;
+        Self::open_reader(&device)
     }
 
-    pub fn init(&mut self) -> &mut Self {
-        self.device_handle
-            .set_auto_detach_kernel_driver(true)
-            .expect("Error detaching old driver.");
-
-        let configurations = Self::get_configurations(&self.device);
-        let interface_descriptors = Self::get_hid_interface_descriptors(&configurations);
-
-        for interface_descriptor in interface_descriptors {
-            self.device_handle
-                .claim_interface(interface_descriptor.interface_number())
-                .expect("Error claiming interface.");
-            for endpoint_descriptor in interface_descriptor.endpoint_descriptors() {
-                if endpoint_descriptor.transfer_type() == TransferType::Interrupt
-                    && endpoint_descriptor.max_packet_size() == 64
-                {
-                    self.endpoint_address = endpoint_descriptor.address();
-                }
-            }
-        }
-        self.reset();
-        self
+    /// Check that this exact tablet can be opened without changing its mode.
+    /// This lets the service wait briefly for uaccess without repeating any
+    /// feature reports, resets, or interface claims.
+    pub fn check_access(vid: u16, pid: u16) -> Result<(), UsbError> {
+        let device = Self::target_device(vid, pid)?;
+        drop(device.open()?);
+        Ok(())
     }
 
-    pub fn reset(&mut self) {
-        self.device_handle.reset().expect("Error reseting device.");
+    pub fn read(&self, buffer: &mut [u8]) -> Result<usize, UsbError> {
+        self.handle
+            .read_interrupt(DATA_ENDPOINT, buffer, Duration::from_secs(1))
     }
 
-    pub fn read_device_responses(&self, buffer: &mut [u8]) -> Result<usize, RusbError> {
-        self.device_handle
-            .read_interrupt(self.endpoint_address, buffer, Duration::from_secs(3))
-    }
+    fn send_full_area_reports(device: &Device<GlobalContext>) -> Result<(), UsbError> {
+        let mut handle = device.open()?;
+        handle.set_auto_detach_kernel_driver(true)?;
+        handle.claim_interface(MODE_INTERFACE)?;
 
-    pub fn set_full_mode(&mut self) -> &mut Self {
-        const REPORTS: [[u8; 8]; 1] = [[0x08, 0x03, 0x00, 0xff, 0xf0, 0x00, 0xff, 0xf0]];
-        let reports_as_slices: Vec<&[u8]> = REPORTS.iter().map(|r| &r[..]).collect();
-        self.set_report(&reports_as_slices)
-            .expect("Error sending report.");
-        self
-    }
-
-    pub fn set_report(&mut self, reports: &[&[u8]]) -> Result<(), RusbError> {
-        for report in reports.iter() {
-            self.device_handle.write_control(
+        for report in FULL_AREA_REPORTS {
+            handle.write_control(
                 0x21,
-                0x9,
+                0x09,
                 0x0308,
-                2,
-                report,
+                u16::from(MODE_INTERFACE),
+                &report,
                 Duration::from_millis(250),
             )?;
         }
 
+        handle.release_interface(MODE_INTERFACE)?;
         Ok(())
     }
 
-    fn is_target_device(vid: u16, pid: u16, device: &Device<GlobalContext>) -> bool {
-        let device_descriptor = device.device_descriptor().unwrap();
-        device_descriptor.vendor_id() == vid && device_descriptor.product_id() == pid
+    fn open_reader(device: &Device<GlobalContext>) -> Result<Self, UsbError> {
+        let mut handle = device.open()?;
+        handle.reset()?;
+
+        let detached_interfaces = Self::detach_kernel_interfaces(&mut handle)?;
+
+        let setup_result = (|| {
+            handle.set_active_configuration(ACTIVE_CONFIGURATION)?;
+            handle.claim_interface(DATA_INTERFACE)?;
+            if let Err(error) = handle.claim_interface(MODE_INTERFACE) {
+                let _ = handle.release_interface(DATA_INTERFACE);
+                return Err(error);
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = setup_result {
+            Self::reattach_kernel_interfaces(&mut handle, &detached_interfaces);
+            return Err(error);
+        }
+
+        Ok(Self {
+            handle,
+            detached_interfaces,
+        })
     }
 
-    fn get_target_device(vid: u16, pid: u16) -> Result<Device<GlobalContext>, RusbError> {
-        match devices()?
-            .iter()
-            .find(|device| Self::is_target_device(vid, pid, device))
-        {
-            Some(device) => Ok(device),
-            None => Err(RusbError::NoDevice),
+    fn detach_kernel_interfaces(
+        handle: &mut DeviceHandle<GlobalContext>,
+    ) -> Result<Vec<u8>, UsbError> {
+        let mut detached = Vec::new();
+
+        for interface in 0..=MODE_INTERFACE {
+            let active = match handle.kernel_driver_active(interface) {
+                Ok(active) => active,
+                Err(error) => {
+                    Self::reattach_kernel_interfaces(handle, &detached);
+                    return Err(error);
+                }
+            };
+
+            if active {
+                if let Err(error) = handle.detach_kernel_driver(interface) {
+                    Self::reattach_kernel_interfaces(handle, &detached);
+                    return Err(error);
+                }
+                detached.push(interface);
+            }
+        }
+
+        Ok(detached)
+    }
+
+    fn reattach_kernel_interfaces(handle: &mut DeviceHandle<GlobalContext>, interfaces: &[u8]) {
+        for &interface in interfaces.iter().rev() {
+            let _ = handle.attach_kernel_driver(interface);
         }
     }
-    fn get_hid_interface_descriptors(
-        config_descriptors: &[ConfigDescriptor],
-    ) -> Vec<InterfaceDescriptor> {
-        config_descriptors
+
+    fn target_device(vid: u16, pid: u16) -> Result<Device<GlobalContext>, UsbError> {
+        devices()?
             .iter()
-            .flat_map(|config_descriptor| config_descriptor.interfaces())
-            .flat_map(|interface| interface.descriptors())
-            .filter(|interface_descriptor| {
-                interface_descriptor.class_code() == rusb::constants::LIBUSB_CLASS_HID
+            .find(|device| {
+                device.device_descriptor().is_ok_and(|descriptor| {
+                    descriptor.vendor_id() == vid && descriptor.product_id() == pid
+                })
             })
-            .collect()
+            .ok_or(UsbError::NoDevice)
+    }
+}
+
+impl Drop for PhysicalDevice {
+    fn drop(&mut self) {
+        let _ = self.handle.release_interface(MODE_INTERFACE);
+        let _ = self.handle.release_interface(DATA_INTERFACE);
+        Self::reattach_kernel_interfaces(&mut self.handle, &self.detached_interfaces);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DATA_ENDPOINT, DATA_INTERFACE, FULL_AREA_REPORTS, MODE_INTERFACE};
+
+    #[test]
+    fn full_area_sequence_matches_digimend_probe() {
+        assert_eq!(
+            FULL_AREA_REPORTS,
+            [
+                [0x08, 0x04, 0x1d, 0x01, 0xff, 0xff, 0x06, 0x2e],
+                [0x08, 0x03, 0x00, 0xff, 0xf0, 0x00, 0xff, 0xf0],
+                [0x08, 0x06, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+                [0x08, 0x03, 0x00, 0xff, 0xf0, 0x00, 0xff, 0xf0],
+            ]
+        );
     }
 
-    fn get_configurations(device: &Device<GlobalContext>) -> Vec<ConfigDescriptor> {
-        let device_descriptor = device.device_descriptor().unwrap();
-        (0..device_descriptor.num_configurations())
-            .filter_map(|n| device.config_descriptor(n).ok())
-            .collect()
+    #[test]
+    fn reader_uses_full_area_interface_and_endpoint() {
+        assert_eq!(DATA_INTERFACE, 1);
+        assert_eq!(MODE_INTERFACE, 2);
+        assert_eq!(DATA_ENDPOINT, 0x84);
     }
 }
