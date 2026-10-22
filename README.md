@@ -1,130 +1,111 @@
-# T501 / Tomate MTM-1106 driver for Linux
+# Tomate MTM-1106 / Gotop T501 Linux Driver (v1.1.0)
 
-A small userspace driver for drawing tablets that show up as:
+A lightweight userspace driver for graphics tablets using the **Gotop T501 / 10moons / VINSA (`08f2:6811`)** chipset. Built and optimized for **Bazzite**, **Fedora**, **Arch Linux**, and other modern Linux distributions running Wayland or X11.
 
 ```text
-08f2:6811 Gotop Information Inc. [T501] Driver Inside Tablet
+ID 08f2:6811 Gotop Information Inc. [T501] Driver Inside Tablet
 ```
 
-I made this for my own Tomate MTM-1106 because Linux only used the small
-phone area of the tablet. I am sharing it in case someone else has the same
-hardware.
+---
 
-This is a personal fix, not an actively maintained driver. If it keeps working
-for me, I probably will not update it. Feel free to use or change it if it helps
-with your tablet.
+## 📌 What is it for?
 
-So far, it has only been tested on **Bazzite 43**, using **KDE Plasma/Wayland
-in Desktop Mode**.
+On Linux, this tablet defaults to an "Android phone mode", restricting the active area to a tiny 3x6" rectangle in the upper corner.
 
-## What works
+This driver:
+* **Unlocks the full 10x6" active area**.
+* **Eliminates hover cursor flickering**: Stable cursor positioning near the surface (no rapid blinking or disappearing).
+* **Adds natural drag-to-scroll**: Drag the pen on the tablet surface to scroll web pages, feeds, and PDF documents.
+* **Hotplug support**: Starts automatically when plugged in and stops when disconnected.
+* **Runs without root privileges**: Operates as a systemd user service via standard `uaccess` rules.
 
-- the full drawing area;
-- pressure sensitivity;
-- absolute pen positioning;
-- pen buttons and tablet shortcuts;
-- automatic start when the tablet is connected;
-- automatic stop when it is unplugged.
+---
 
-Fast diagonal lines are sent as a single input frame, which avoids the
-stair-step lines I was seeing in Xournal++.
+## ⚙️ How does it work?
 
-## Check your tablet
+The driver runs silently in the background and supports two switchable modes:
 
-This was only tested with USB ID `08f2:6811`. Check yours with:
+### 1. Pen Mode (Default)
+* **Pen tip**: Drawing and handwriting with 6000 levels of pressure sensitivity (Krita, GIMP, Xournal++, etc.).
+* **Cursor**: Absolute positioning across your displays.
+* **Quick scroll shortcut**: Hold the lower barrel button on the pen and drag the tip to scroll at any time without switching modes.
 
+### 2. Scroll Mode (Navigation)
+Press physical button **"B"** (the 2nd button from the top on the tablet):
+* **Drag pen up / down**: Smoothly scrolls the page under the cursor.
+* **Quick tap**: Performs a standard left-click.
+* Press **"B"** again to return to drawing mode.
+
+---
+
+## 📥 Download & Installation
+
+The repository includes a ready-to-use precompiled binary and a one-step installer:
+
+### Option A: Install from Git (Recommended)
 ```bash
-lsusb -d 08f2:6811
+git clone https://github.com/inaciogm/t501-tablet-linux-driver.git
+cd t501-tablet-linux-driver
+./install.sh
 ```
 
-The product name is not enough. Other tablets may use different hardware even
-if they look the same.
+### Option B: Precompiled Tarball
+* Download [`dist/tomate-mtm1106-driver-v1.1.0-linux-x86_64.tar.gz`](dist/tomate-mtm1106-driver-v1.1.0-linux-x86_64.tar.gz)
+* Extract the archive and run `./install.sh`.
 
-## Build on Bazzite
-
-This builds the driver inside a temporary Fedora container, so Rust does not
-need to be installed on the Bazzite host:
-
+### Uninstallation
 ```bash
-cd /path/to/t501-tablet-linux-driver
+./uninstall.sh
+```
 
+---
+
+## ⌨️ Physical Tablet Shortcuts
+
+| Button | Key | Function |
+| :---: | :---: | :--- |
+| **1** | `Tab` | Tool switch / Tab |
+| **2** | `B` | **Toggle Pen Mode / Scroll Mode** |
+| **3** | `Alt` | Color picker / Alt shortcut |
+| **4** | `Ctrl` | Ctrl modifier |
+| **5** | `Page Up` | Scroll up |
+| **6** | `Page Down` | Scroll down |
+| **7** | `[` | Decrease brush size |
+| **8** | `Ctrl + -` | Zoom out |
+| **9** | `Ctrl + +` | Zoom in |
+| **10** | `Esc` | Cancel / Escape |
+| **11** | `Space` | Hand tool / Pan canvas |
+| **12** | `]` | Increase brush size |
+
+---
+
+## 🛠️ Build from Source (Optional)
+
+### On Bazzite / Fedora Silverblue (using Podman, no Rust needed on host):
+```bash
 podman run --rm \
   -v "$PWD:/work:Z" \
   -w /work/driver \
-  registry.fedoraproject.org/fedora:43 \
+  registry.fedoraproject.org/fedora:41 \
   bash -lc 'dnf install -y cargo rustfmt clippy libusb1-devel && \
     cargo test --all-targets --locked && \
     cargo clippy --all-targets --locked -- -D warnings && \
     cargo build --release --locked'
 ```
 
-The binary will be at `driver/target/release/v1060p`. The old upstream name is
-kept in the build, but it is installed below as `tomate-mtm1106-driver`.
-
-## Install on Bazzite KDE
-
-Run from the repository root:
-
+### On Fedora / Arch / Ubuntu (native Rust):
 ```bash
-install -Dm755 driver/target/release/v1060p \
-  "$HOME/.local/libexec/tomate-mtm1106-driver"
-
-install -Dm644 packaging/tomate-mtm1106.service \
-  "$HOME/.config/systemd/user/tomate-mtm1106.service"
-
-systemctl --user daemon-reload
-systemctl --user enable tomate-mtm1106.service
-
-pkexec install -Dm644 packaging/60-tomate-mtm1106.rules \
-  /etc/udev/rules.d/60-tomate-mtm1106.rules
-
-pkexec udevadm control --reload-rules
+cd driver
+cargo test
+cargo build --release
 ```
 
-Unplug and reconnect the tablet. If it was already connected when Plasma
-started, run:
+After building, run `./install.sh`.
 
-```bash
-systemctl --user start tomate-mtm1106.service
-```
+---
 
-The service stays inactive while the tablet is not connected. To check it:
+## 📜 About the Fork
 
-```bash
-systemctl --user status tomate-mtm1106.service
-journalctl --user -u tomate-mtm1106.service -n 30 --no-pager
-```
+Forked from [feveal/Tablet-VINSA-1060-Plus-Linux-Driver](https://github.com/feveal/Tablet-VINSA-1060-Plus-Linux-Driver) and incorporating T501 protocol research from the [DIGImend](https://github.com/DIGImend/10moons-tools) project.
 
-## Remove
-
-```bash
-systemctl --user disable --now tomate-mtm1106.service
-rm -f "$HOME/.config/systemd/user/tomate-mtm1106.service"
-rm -f "$HOME/.local/libexec/tomate-mtm1106-driver"
-systemctl --user daemon-reload
-
-pkexec rm -f /etc/udev/rules.d/60-tomate-mtm1106.rules
-pkexec udevadm control --reload-rules
-```
-
-## A few notes
-
-- The driver runs as the desktop user, not as root.
-- The `udev` rule only matches USB device `08f2:6811` and uses `uaccess`.
-- The driver does not use the network or run external commands.
-- The included service is tied to Plasma, so it does not start in Bazzite Game
-  Mode.
-- This is a userspace workaround, not a kernel driver.
-
-I wrote down the safety checks I made in [AUDIT.md](AUDIT.md).
-
-## Credits and license
-
-This version was built with OpenAI Codex and tested on my own tablet.
-
-This is based on
-[feveal/Tablet-VINSA-1060-Plus-Linux-Driver](https://github.com/feveal/Tablet-VINSA-1060-Plus-Linux-Driver)
-and the T501 work from
-[DIGImend/10moons-tools](https://github.com/DIGImend/10moons-tools).
-
-Licensed under GPL-3.0. See [LICENSE](LICENSE).
+Rewritten for modern Wayland/systemd environments, resolving hover proximity noise, pressure hysteresis calibration, and adding native drag-to-scroll navigation. Licensed under [GPL-3.0](LICENSE).

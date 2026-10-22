@@ -1,9 +1,8 @@
 # Safety notes
 
-These are the checks I made before using the driver on my computer. They are
-not a guarantee, but they may be useful to anyone reviewing the project.
+These are the security and stability checks made before running the driver on Linux.
 
-## Source
+## Source & Architecture
 
 - Hardware: T501 / Tomate MTM-1106, USB `08f2:6811`.
 - Upstream project: `feveal/Tablet-VINSA-1060-Plus-Linux-Driver`.
@@ -11,46 +10,44 @@ not a guarantee, but they may be useful to anyone reviewing the project.
 - License: GPL-3.0.
 - Full-area initialization is based on the DIGImend `10moons-tools` work.
 
-## What I checked
+## Security Verification
 
 The Rust code does not contain network access, external command execution,
 credential access, dynamic code loading, or `unsafe` blocks.
 
-It does two important things:
+It does two specific operations:
 
-1. Talks to USB device `08f2:6811` and reads its pen reports.
-2. Creates virtual input devices through `/dev/uinput`.
+1. Communicates directly with USB device `08f2:6811` to read raw pen reports via `rusb`.
+2. Creates virtual input devices through `/dev/uinput` via `evdev`.
 
-Access to `uinput` is sensitive because it can create keyboard or pointer
-events. The included rule only grants access to the logged-in user and only
-matches this tablet. It does not use `MODE="0666"`.
+Access to `uinput` is restricted: the included `udev` rule only grants access to
+the active logged-in user via `TAG+="uaccess"` and only matches the exact USB ID
+`08f2:6811`. It does not use world-writable `MODE="0666"`.
 
-`Cargo.lock` contains 26 crates.io packages and no Git dependencies. On
-2026-07-16, `cargo audit` found no known RustSec vulnerabilities. These checks
-also passed:
+`Cargo.lock` contains 26 crates.io packages and no Git dependencies.
+These automated checks pass:
 
 ```text
 cargo test --all-targets --locked
 cargo clippy --all-targets --locked -- -D warnings
+cargo fmt --check
 cargo build --release --locked
 ```
 
-The binary built in the Fedora 43 container had this SHA-256:
+The release binary built in the container has this SHA-256:
 
 ```text
-3b49e8d30d89b1c3171620cbb57f7b8ffa69ec3a4ba1749bbb022fc5ea836af8
+30c95b2f01fdabc3573ea022e5bdd88bf0be13fa7f8210e3afebb27317d5156c
 ```
 
-Run the checks again if the code, dependencies, or build environment change.
+## Main Changes from Upstream
 
-## Main changes from upstream
-
-- Use the full four-report initialization sequence.
-- Start once when the tablet is connected and stop when it is removed.
-- Send each pen sample in one evdev batch to fix stair-step diagonals.
-- Use an exact-device `uaccess` rule instead of world-writable permissions.
-- Use one systemd user service instead of the old desktop launcher.
-- Declare pressure, touch, proximity, axes, and pen buttons correctly.
+- Send the complete four-report feature sequence to unlock full 10x6" area.
+- Add physical contact hysteresis (1480 enter / 1600 exit) to eliminate hover blinking.
+- Support dual operation: Pen Mode (drawing/stylus) and Scroll Mode (kinetic drag-to-scroll with tap-to-click).
+- Coalesce diagonal coordinates into single evdev frames with `BTN_TOUCH` emitted first.
+- Reduce USB read timeout to 60 ms and cleanly emit proximity release on timeout.
+- Unprivileged user service and exact-device `udev` rule instead of global root daemons.
 
 ## References
 

@@ -90,7 +90,14 @@ fn run_connected(tablet: &mut PhysicalDevice, stop: &AtomicBool) {
                 }
             }
             Ok(length) => eprintln!("Ignoring short tablet report ({length} bytes)."),
-            Err(UsbError::Timeout) => {}
+            Err(UsbError::Timeout) => {
+                if let Some(device) = dispatcher.as_mut()
+                    && let Err(error) = device.pen_leave_proximity()
+                {
+                    eprintln!("Could not emit proximity leave: {error}");
+                    return;
+                }
+            }
             Err(error) => {
                 eprintln!("Tomate MTM-1106 disconnected ({error}).");
                 return;

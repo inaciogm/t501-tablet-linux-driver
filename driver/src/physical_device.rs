@@ -1,6 +1,7 @@
 use rusb::{Device, DeviceHandle, Error as UsbError, GlobalContext, devices};
 use std::time::Duration;
 
+pub const DATA_READ_TIMEOUT: Duration = Duration::from_millis(60);
 const DATA_INTERFACE: u8 = 1;
 const MODE_INTERFACE: u8 = 2;
 const DATA_ENDPOINT: u8 = 0x84;
@@ -44,7 +45,7 @@ impl PhysicalDevice {
 
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize, UsbError> {
         self.handle
-            .read_interrupt(DATA_ENDPOINT, buffer, Duration::from_secs(1))
+            .read_interrupt(DATA_ENDPOINT, buffer, DATA_READ_TIMEOUT)
     }
 
     fn send_full_area_reports(device: &Device<GlobalContext>) -> Result<(), UsbError> {
@@ -148,7 +149,10 @@ impl Drop for PhysicalDevice {
 
 #[cfg(test)]
 mod tests {
-    use super::{DATA_ENDPOINT, DATA_INTERFACE, FULL_AREA_REPORTS, MODE_INTERFACE};
+    use super::{
+        DATA_ENDPOINT, DATA_INTERFACE, DATA_READ_TIMEOUT, FULL_AREA_REPORTS, MODE_INTERFACE,
+    };
+    use std::time::Duration;
 
     #[test]
     fn full_area_sequence_matches_digimend_probe() {
@@ -168,5 +172,10 @@ mod tests {
         assert_eq!(DATA_INTERFACE, 1);
         assert_eq!(MODE_INTERFACE, 2);
         assert_eq!(DATA_ENDPOINT, 0x84);
+    }
+
+    #[test]
+    fn read_timeout_is_responsive_for_proximity_exit() {
+        assert!(DATA_READ_TIMEOUT <= Duration::from_millis(100));
     }
 }
