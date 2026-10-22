@@ -1,13 +1,12 @@
 [Unit]
 Description=Tomate MTM-1106 full-area tablet driver
-PartOf=plasma-workspace.target
-Requisite=plasma-workspace.target
-After=plasma-workspace.target
+After=default.target
 
 [Service]
 Type=simple
 ExecStart=%h/.local/libexec/tomate-mtm1106-driver
-Restart=no
+Restart=always
+RestartSec=2
 TimeoutStopSec=3
 
 # The driver only needs the tablet USB node and /dev/uinput.
@@ -27,4 +26,4 @@ RestrictAddressFamilies=AF_UNIX AF_NETLINK
 UMask=0077
 
 [Install]
-WantedBy=plasma-workspace.target
+WantedBy=default.target

@@ -34,15 +34,6 @@ impl PhysicalDevice {
         Self::open_reader(&device)
     }
 
-    /// Check that this exact tablet can be opened without changing its mode.
-    /// This lets the service wait briefly for uaccess without repeating any
-    /// feature reports, resets, or interface claims.
-    pub fn check_access(vid: u16, pid: u16) -> Result<(), UsbError> {
-        let device = Self::target_device(vid, pid)?;
-        drop(device.open()?);
-        Ok(())
-    }
-
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize, UsbError> {
         self.handle
             .read_interrupt(DATA_ENDPOINT, buffer, DATA_READ_TIMEOUT)
