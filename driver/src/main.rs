@@ -49,39 +49,32 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn run_connected(tablet: &mut PhysicalDevice, stop: &AtomicBool) {
     let mut reader = RawDataReader::new();
-    let mut dispatcher = None;
 
     println!("Tomate MTM-1106 initialized in full-area mode.");
+
+    let mut dispatcher = match DeviceDispatcher::new() {
+        Ok(device) => {
+            println!("Pen input is ready.");
+            device
+        }
+        Err(error) => {
+            eprintln!("Could not create virtual pen: {error}");
+            return;
+        }
+    };
 
     while !stop.load(Ordering::Relaxed) {
         reader.data.fill(0);
         match tablet.read(&mut reader.data) {
             Ok(length) if length >= MIN_REPORT_LENGTH => {
-                if dispatcher.is_none() {
-                    match DeviceDispatcher::new() {
-                        Ok(device) => {
-                            dispatcher = Some(device);
-                            println!("Pen input is ready.");
-                        }
-                        Err(error) => {
-                            eprintln!("Could not create virtual pen: {error}");
-                            return;
-                        }
-                    }
-                }
-
-                if let Some(device) = dispatcher.as_mut()
-                    && let Err(error) = device.dispatch(&reader)
-                {
+                if let Err(error) = dispatcher.dispatch(&reader) {
                     eprintln!("Could not emit tablet input: {error}");
                     return;
                 }
             }
             Ok(length) => eprintln!("Ignoring short tablet report ({length} bytes)."),
             Err(UsbError::Timeout) => {
-                if let Some(device) = dispatcher.as_mut()
-                    && let Err(error) = device.pen_leave_proximity()
-                {
+                if let Err(error) = dispatcher.pen_leave_proximity() {
                     eprintln!("Could not emit proximity leave: {error}");
                     return;
                 }

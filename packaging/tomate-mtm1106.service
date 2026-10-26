@@ -1,6 +1,7 @@
 [Unit]
 Description=Tomate MTM-1106 full-area tablet driver
-After=default.target
+After=plasma-workspace.target graphical-session.target default.target
+PartOf=plasma-workspace.target
 
 [Service]
 Type=simple
@@ -26,4 +27,4 @@ RestrictAddressFamilies=AF_UNIX AF_NETLINK
 UMask=0077
 
 [Install]
-WantedBy=default.target
+WantedBy=plasma-workspace.target default.target

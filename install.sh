@@ -24,11 +24,11 @@ install -Dm755 "$BIN_SRC" "$HOME/.local/libexec/tomate-mtm1106-driver"
 mkdir -p "$HOME/.config/systemd/user"
 install -Dm644 "$SCRIPT_DIR/packaging/tomate-mtm1106.service" "$HOME/.config/systemd/user/tomate-mtm1106.service"
 
-echo "==> Ativando serviço de usuário no systemd..."
+echo "==> Configurando inicialização automática (autostart) no systemd..."
 systemctl --user daemon-reload
 systemctl --user enable tomate-mtm1106.service
 
-echo "==> Instalando regra do udev (solicitará autorização)..."
+echo "==> Instalando regra do udev para permissões e autostart ao conectar cabo USB..."
 SUDO_CMD=""
 if command -v pkexec >/dev/null 2>&1; then
     SUDO_CMD="pkexec"
@@ -49,5 +49,7 @@ systemctl --user restart tomate-mtm1106.service || systemctl --user start tomate
 
 echo ""
 echo "Instalação concluída com sucesso!"
+echo "O driver está configurado para iniciar automaticamente tanto ao fazer login quanto ao plugar o cabo USB."
+echo ""
 echo "Status do serviço:"
 systemctl --user status tomate-mtm1106.service --no-pager || true
